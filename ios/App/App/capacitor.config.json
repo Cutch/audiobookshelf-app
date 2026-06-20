@@ -6,6 +6,12 @@
 		"CapacitorHttp": {
 			"enabled": false
 		},
+		"CapacitorCookies": {
+			"enabled": true
+		},
+		"InAppAuthWebView": {
+			"enabled": true
+		},
 		"StatusBar": {
 			"backgroundColor": "#232323",
 			"style": "DARK"
