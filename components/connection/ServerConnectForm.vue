@@ -95,6 +95,8 @@
 import { Browser } from '@capacitor/browser'
 import { CapacitorHttp } from '@capacitor/core'
 import { Dialog } from '@capacitor/dialog'
+import { InAppAuthWebView } from '@/plugins/InAppAuthWebView/index'
+import { CapacitorCookies } from '@capacitor/core'
 
 // TODO: when backend ready. See validateLoginFormResponse()
 //const requiredServerVersion = '2.5.0'
@@ -454,18 +456,34 @@ export default {
         ...config
       }
       this.showForm = true
-      var success = await this.pingServerAddress(config.address)
+
+      // Validate server and handle redirects (e.g., Cloudflare Access)
+      // Use the same logic as initial submission to ensure consistency
+      const initialAddress = config.address
+      const protocolProvided = initialAddress.startsWith('http://') || initialAddress.startsWith('https://')
+      const address = this.prependProtocolIfNeeded(initialAddress)
+
+      const validation = await this.validateServerAndHandleRedirect(address, protocolProvided)
       this.processing = false
-      console.log(`[ServerConnectForm] pingServer result ${success}`)
-      if (!success) {
+
+      if (!validation.success) {
         this.showForm = false
         this.showAuth = false
-        console.log(`[ServerConnectForm] showForm ${this.showForm}`)
+        console.log(`[ServerConnectForm] Server validation failed for ${config.address}`)
         return
       }
 
+      // Server validation succeeded, update config with discovered info
+      const statusData = validation.statusData
+      this.authMethods = statusData.data.authMethods || []
+      this.oauth.buttonText = statusData.data.authFormData?.authOpenIDButtonText || 'Login with OpenID'
+      this.serverConfig.version = statusData.data.serverVersion
+      this.serverConfig.address = address // Use the validated address (may have corrected protocol)
+
       this.error = null
+      this.processing = true
       const payload = await this.authenticateToken()
+      this.processing = false
 
       if (payload) {
         // Will NOT include access token and refresh token
@@ -565,14 +583,22 @@ export default {
      * @throws {Error} An error with 'code' property set to the error code if the request fails.
      */
     async getRequest(url, headers, connectTimeout = 6000) {
+      const cookiesMap = await CapacitorCookies.getCookies({
+        url: new URL(url).origin
+      })
+      const existingCookies = (headers?.Cookie ?? headers?.cookie ?? '').split(';')
+      const cookieHeader = [...Object.entries(cookiesMap).map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`), ...existingCookies].join('; ')
       const options = {
         url,
-        headers,
+        headers: {
+          ...headers,
+          Cookie: cookieHeader
+        },
         connectTimeout
       }
       try {
         const response = await CapacitorHttp.get(options)
-        console.log('[ServerConnectForm] GET request response', response)
+        console.log('[ServerConnectForm] GET request response', JSON.stringify(options), JSON.stringify(response))
         if (response.status == 200) {
           return response
         } else {
@@ -600,7 +626,7 @@ export default {
         connectTimeout
       }
       const response = await CapacitorHttp.post(options)
-      console.log('[ServerConnectForm] POST request response', response)
+      console.log('[ServerConnectForm] POST request response', JSON.stringify(response))
       if (response.status >= 400) {
         throw new Error(response.data)
       } else {
@@ -665,37 +691,59 @@ export default {
       // Did the user specify a protocol?
       const protocolProvided = initialAddress.startsWith('http://') || initialAddress.startsWith('https://')
       // Add https:// if not provided
-      this.serverConfig.address = this.prependProtocolIfNeeded(initialAddress)
+      const address = this.prependProtocolIfNeeded(initialAddress)
 
       this.processing = true
       this.error = null
       this.authMethods = []
 
-      try {
-        console.log('[ServerConnectForm] submit tryServerUrl: ' + this.serverConfig.address)
-        // Try the server URL. If it fails and the protocol was not provided, try with http instead of https
-        const statusData = await this.tryServerUrl(this.serverConfig.address, !protocolProvided)
-        if (this.validateLoginFormResponse(statusData, this.serverConfig.address, protocolProvided)) {
-          this.showAuth = true
-          this.authMethods = statusData.data.authMethods || []
-          this.oauth.buttonText = statusData.data.authFormData?.authOpenIDButtonText || 'Login with OpenID'
-          this.serverConfig.version = statusData.data.serverVersion
+      // Use shared validation function that handles redirects (e.g., Cloudflare Access)
+      const validation = await this.validateServerAndHandleRedirect(address, protocolProvided)
+      this.processing = false
 
-          if (statusData.data.authFormData?.authOpenIDAutoLaunch && !preventAutoLogin) {
-            this.clickLoginWithOpenId()
-          }
-          return true
-        } else {
-          console.log('[ServerConnectForm] submit validateLoginFormResponse failed: ' + this.serverConfig.address)
-          return false
-        }
-      } catch (error) {
-        this.handleLoginFormError(error)
+      if (!validation.success) {
         return false
-      } finally {
-        this.processing = false
       }
+
+      // Validation succeeded, update config with discovered info
+      const statusData = validation.statusData
+      this.serverConfig.address = address // Use the validated address (may have corrected protocol)
+      this.showAuth = true
+      this.authMethods = statusData.data.authMethods || []
+      this.oauth.buttonText = statusData.data.authFormData?.authOpenIDButtonText || 'Login with OpenID'
+      this.serverConfig.version = statusData.data.serverVersion
+
+      if (statusData.data.authFormData?.authOpenIDAutoLaunch && !preventAutoLogin) {
+        this.clickLoginWithOpenId()
+      }
+      return true
     },
+    validateResponseData(statusData) {
+      // Check content of response now
+      if (!statusData || !statusData.data || Object.keys(statusData).length === 0) {
+        this.error = 'Response from server was empty' // Usually some kind of config error on server side
+        console.error('[ServerConnectForm] Received empty response')
+        return false
+      } else if (!('isInit' in statusData.data) || !('language' in statusData.data)) {
+        this.error = 'This does not seem to be a Audiobookshelf server'
+        console.error('[ServerConnectForm] Received as response from Server:\n', statusData)
+        return false
+      } else if (!statusData.data.isInit) {
+        this.error = 'Server is not initialized'
+        return false
+      }
+
+      // If we got redirected from http to https, we allow this
+      // Also there is the possibility that https was tried (with protocolProvided false) but only http was successful
+      // So set the correct protocol for the config
+      const configUrl = new URL(this.serverConfig.address)
+      configUrl.protocol = statusData.url.startsWith('https://') ? 'https:' : 'http:'
+      // Remove trailing slash
+      this.serverConfig.address = configUrl.toString().replace(/\/$/, '')
+
+      return true
+    },
+
     /** Validates the login form response from the server.
      *
      * Ensure the request has not been redirected to an unexpected hostname and check if it is Audiobookshelf
@@ -706,16 +754,54 @@ export default {
      *
      * @returns {boolean} - Returns `true` if the response is valid, otherwise `false` and sets this.error.
      */
-    validateLoginFormResponse(statusData, initialAddressWithProtocol, protocolProvided) {
+    async validateLoginFormResponse(statusData, initialAddressWithProtocol, protocolProvided) {
       // We have a 200 status code at this point
 
       // Check if we got redirected to a different hostname, we don't allow this
       const initialAddressUrl = new URL(initialAddressWithProtocol)
       const currentAddressUrl = new URL(statusData.url)
       if (initialAddressUrl.hostname !== currentAddressUrl.hostname) {
-        this.error = `Server redirected somewhere else (to ${currentAddressUrl.hostname})`
-        console.error(`[ServerConnectForm] Server redirected somewhere else (to ${currentAddressUrl.hostname})`)
-        return false
+        console.log('[ServerConnectForm] Detected redirect to different hostname, using InAppAuthWebView for authentication')
+
+        // For services like Cloudflare Access, use in-app WebView that shares cookies with the app
+        // This ensures the Cloudflare session cookie is stored in the app's cookie store
+        try {
+          // Use InAppAuthWebView on native platforms, fallback to external Browser on web
+          // Success pattern: wait for navigation back to the base origin (not callback paths like /cdn-cgi/access/authorized)
+          // We match when the URL is the origin with no path, or just the root path
+          const successPattern = initialAddressUrl.origin + '/'
+          const result = await InAppAuthWebView.show({
+            url: initialAddressWithProtocol,
+            successUrlPattern: successPattern,
+            errorUrlPattern: 'error',
+            title: 'Access Authentication',
+            showToolbar: true,
+            enableJavaScript: true,
+            enableDomStorage: true
+          })
+
+          console.log('[ServerConnectForm] InAppAuthWebView result:', JSON.stringify(result))
+          if (result.dismissed) return
+
+          if (result.error) {
+            this.error = `Authentication failed: ${result.error}`
+            return false
+          }
+
+          // Authentication completed, now validate the response from the server
+          const authStatusData = await this.getServerAddressStatus(initialAddressWithProtocol)
+          console.log('authStatusData', JSON.stringify(authStatusData))
+          if (this.validateResponseData(authStatusData)) {
+            return true
+          }
+
+          this.error = 'Authentication completed but server validation failed'
+          return false
+        } catch (error) {
+          console.error('[ServerConnectForm] InAppAuthWebView error:', error)
+          this.error = `Authentication error: ${error.message || error}`
+          return false
+        }
       } // We don't allow a redirection back from https to http if the user used https:// explicitly
       else if (protocolProvided && initialAddressWithProtocol.startsWith('https://') && currentAddressUrl.protocol === 'http') {
         this.error = `You specified https:// but the Server redirected back to plain http`
@@ -724,38 +810,29 @@ export default {
       }
 
       // Check content of response now
-      if (!statusData || !statusData.data || Object.keys(statusData).length === 0) {
-        this.error = 'Response from server was empty' // Usually some kind of config error on server side
-        console.error('[ServerConnectForm] Received empty response')
-        return false
-      } else if (!('isInit' in statusData.data) || !('language' in statusData.data)) {
-        this.error = 'This does not seem to be a Audiobookshelf server'
-        console.error('[ServerConnectForm] Received as response from Server:\n', statusData)
-        return false
-        //    TODO: delete the if above and comment the ones below out, as soon as the backend is ready to introduce a version check
-        //    } else if (!('app' in statusData.data) || statusData.data.app.toLowerCase() !== 'audiobookshelf') {
-        //      this.error = 'This does not seem to be a Audiobookshelf server'
-        //      console.error('[ServerConnectForm] Received as response from Server:\n', statusData)
-        //      return false
-        //    } else if (!this.isValidVersion(statusData.data.serverVersion, requiredServerVersion)) {
-        //      this.error = `Server version is below minimum required version of ${requiredServerVersion} (${statusData.data.serverVersion})`
-        //      console.error('[ServerConnectForm] Server version is too low: ', statusData.data.serverVersion)
-        //      return false
-      } else if (!statusData.data.isInit) {
-        this.error = 'Server is not initialized'
-        return false
-      }
-
-      // If we got redirected from http to https, we allow this
-      // Also there is the possibility that https was tried (with protocolProvided false) but only http was successfull
-      // So set the correct protocol for the config
-      const configUrl = new URL(this.serverConfig.address)
-      configUrl.protocol = currentAddressUrl.protocol
-      // Remove trailing slash
-      this.serverConfig.address = configUrl.toString().replace(/\/$/, '')
-
-      return true
+      return this.validateResponseData(statusData)
     },
+    /**
+     * Validates the server response and handles redirects (e.g., Cloudflare Access).
+     * Uses InAppAuthWebView for authentication when a redirect to a different hostname is detected.
+     *
+     * @async
+     * @param {string} address - The server address to validate
+     * @param {boolean} protocolProvided - Whether the protocol was explicitly provided
+     * @returns {Promise<{success: boolean, statusData?: object}>} Result with success flag and status data
+     */
+    async validateServerAndHandleRedirect(address, protocolProvided) {
+      try {
+        // Try the server URL. If it fails and the protocol was not provided, try with http instead of https
+        const statusData = await this.tryServerUrl(address, !protocolProvided)
+        const isValid = await this.validateLoginFormResponse(statusData, address, protocolProvided)
+        return { success: isValid, statusData: isValid ? statusData : null }
+      } catch (error) {
+        this.handleLoginFormError(error)
+        return { success: false, statusData: null }
+      }
+    },
+
     /**
      * Handles errors received during the login form process, providing user-friendly error messages.
      *
