@@ -6,6 +6,7 @@ import android.os.Build
 import android.provider.Settings
 import android.util.Base64
 import android.util.Log
+import android.webkit.CookieManager
 import com.audiobookshelf.app.data.*
 import com.audiobookshelf.app.device.DeviceManager
 import com.audiobookshelf.app.media.MediaEventManager
@@ -48,6 +49,19 @@ class ApiHandler(var ctx:Context) {
   private var jacksonMapper = jacksonObjectMapper().enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature())
   private var secureStorage = SecureStorage(ctx)
 
+  /**
+   * Gets cookies for the given URL from the Android WebKit CookieManager.
+   * This ensures cookies set by the WebView (including Capacitor cookies) are included in native requests.
+   */
+  private fun getCookiesForUrl(url: String): String? {
+    return try {
+      CookieManager.getInstance().getCookie(url)
+    } catch (e: Exception) {
+      Log.e(tag, "Failed to get cookies for URL: $url", e)
+      null
+    }
+  }
+
   data class LocalSessionsSyncRequestPayload(val sessions:List<PlaybackSession>, val deviceInfo:DeviceInfo)
   @JsonIgnoreProperties(ignoreUnknown = true)
   data class LocalSessionSyncResult(val id:String, val success:Boolean, val progressSynced:Boolean?, val error:String?)
@@ -56,11 +70,21 @@ class ApiHandler(var ctx:Context) {
   private fun getRequest(endpoint:String, httpClient:OkHttpClient?, config:ServerConnectionConfig?, cb: (JSObject) -> Unit) {
     val address = config?.address ?: DeviceManager.serverAddress
     val token = config?.token ?: DeviceManager.token
+    val requestUrl = "${address}$endpoint"
 
     try {
-      val request = Request.Builder()
-        .url("${address}$endpoint").addHeader("Authorization", "Bearer $token")
-        .build()
+      val requestBuilder = Request.Builder()
+        .url(requestUrl)
+        .addHeader("Authorization", "Bearer $token")
+
+      // Add cookies from WebKit CookieManager (includes Capacitor cookies)
+      val cookies = getCookiesForUrl(requestUrl)
+      if (!cookies.isNullOrEmpty()) {
+        requestBuilder.addHeader("Cookie", cookies!!)
+        Log.d(tag, "getRequest: Adding cookies to request for $requestUrl")
+      }
+
+      val request = requestBuilder.build()
       makeRequest(request, httpClient, cb)
     } catch(e: Exception) {
       e.printStackTrace()
@@ -78,9 +102,18 @@ class ApiHandler(var ctx:Context) {
     val requestUrl = "${address}$endpoint"
     Log.d(tag, "postRequest to $requestUrl")
     try {
-      val request = Request.Builder().post(requestBody)
-        .url(requestUrl).addHeader("Authorization", "Bearer ${token}")
-        .build()
+      val requestBuilder = Request.Builder().post(requestBody)
+        .url(requestUrl)
+        .addHeader("Authorization", "Bearer ${token}")
+
+      // Add cookies from WebKit CookieManager (includes Capacitor cookies)
+      val cookies = getCookiesForUrl(requestUrl)
+      if (!cookies.isNullOrEmpty()) {
+        requestBuilder.addHeader("Cookie", cookies!!)
+        Log.d(tag, "postRequest: Adding cookies to request for $requestUrl")
+      }
+
+      val request = requestBuilder.build()
       makeRequest(request, null, cb)
     } catch(e: Exception) {
       e.printStackTrace()
@@ -93,10 +126,20 @@ class ApiHandler(var ctx:Context) {
   private fun patchRequest(endpoint:String, payload: JSObject, cb: (JSObject) -> Unit) {
     val mediaType = "application/json; charset=utf-8".toMediaType()
     val requestBody = payload.toString().toRequestBody(mediaType)
+    val requestUrl = "${DeviceManager.serverAddress}$endpoint"
     try {
-      val request = Request.Builder().patch(requestBody)
-        .url("${DeviceManager.serverAddress}$endpoint").addHeader("Authorization", "Bearer ${DeviceManager.token}")
-        .build()
+      val requestBuilder = Request.Builder().patch(requestBody)
+        .url(requestUrl)
+        .addHeader("Authorization", "Bearer ${DeviceManager.token}")
+
+      // Add cookies from WebKit CookieManager (includes Capacitor cookies)
+      val cookies = getCookiesForUrl(requestUrl)
+      if (!cookies.isNullOrEmpty()) {
+        requestBuilder.addHeader("Cookie", cookies!!)
+        Log.d(tag, "patchRequest: Adding cookies to request for $requestUrl")
+      }
+
+      val request = requestBuilder.build()
       makeRequest(request, null, cb)
     } catch(e: Exception) {
       e.printStackTrace()
@@ -201,12 +244,20 @@ class ApiHandler(var ctx:Context) {
 
       // Create refresh token request
       val refreshEndpoint = "${DeviceManager.serverAddress}/auth/refresh"
-      val refreshRequest = Request.Builder()
+      val refreshRequestBuilder = Request.Builder()
         .url(refreshEndpoint)
         .addHeader("x-refresh-token", refreshToken)
         .addHeader("Content-Type", "application/json")
         .post(EMPTY_REQUEST)
-        .build()
+
+      // Add cookies from WebKit CookieManager (includes Capacitor cookies)
+      val refreshCookies = getCookiesForUrl(refreshEndpoint)
+      if (!refreshCookies.isNullOrEmpty()) {
+        refreshRequestBuilder.addHeader("Cookie", refreshCookies!!)
+        Log.d(tag, "handleTokenRefresh: Adding cookies to refresh request")
+      }
+
+      val refreshRequest = refreshRequestBuilder.build()
 
       // Make the refresh request
       val client = httpClient ?: defaultClient
@@ -317,10 +368,19 @@ class ApiHandler(var ctx:Context) {
   private fun retryOriginalRequest(originalRequest: Request, newAccessToken: String, httpClient: OkHttpClient?, callback: (JSObject) -> Unit) {
     try {
       // Create a new request with the updated authorization header
-      val newRequest = originalRequest.newBuilder()
+      val newRequestBuilder = originalRequest.newBuilder()
         .removeHeader("Authorization")
         .addHeader("Authorization", "Bearer $newAccessToken")
-        .build()
+
+      // Add cookies from WebKit CookieManager (includes Capacitor cookies)
+      val requestUrl = newRequestBuilder.build().url.toString()
+      val cookies = getCookiesForUrl(requestUrl)
+      if (!cookies.isNullOrEmpty()) {
+        newRequestBuilder.addHeader("Cookie", cookies!!)
+        Log.d(tag, "retryOriginalRequest: Adding cookies to retry request for $requestUrl")
+      }
+
+      val newRequest = newRequestBuilder.build()
 
       Log.d(tag, "retryOriginalRequest: Retrying request to ${newRequest.url}")
 
