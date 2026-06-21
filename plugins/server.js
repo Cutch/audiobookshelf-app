@@ -1,6 +1,6 @@
 import { io } from 'socket.io-client'
 import EventEmitter from 'events'
-
+import { CapacitorCookies } from '@capacitor/core'
 class ServerSocket extends EventEmitter {
   constructor(store) {
     super()
@@ -24,7 +24,7 @@ class ServerSocket extends EventEmitter {
     else console.error('$off Socket not initialized')
   }
 
-  connect(serverAddress, token) {
+  async connect(serverAddress, token) {
     this.serverAddress = serverAddress
 
     const serverUrl = new URL(serverAddress)
@@ -33,12 +33,22 @@ class ServerSocket extends EventEmitter {
 
     console.log(`[SOCKET] Connecting to ${serverHost} with path ${serverPath}/socket.io`)
 
+    const cookiesMap = await CapacitorCookies.getCookies({
+      url: serverUrl.origin
+    })
+    const cookieHeader = Object.entries(cookiesMap)
+      .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
+      .join('; ')
     const socketOptions = {
       transports: ['websocket'],
       upgrade: false,
       path: `${serverPath}/socket.io`,
-      reconnectionDelayMax: 15000
+      reconnectionDelayMax: 15000,
+      extraHeaders: {
+        Cookie: cookieHeader
+      }
     }
+
     this.socket = io(serverHost, socketOptions)
     this.setSocketListeners()
   }

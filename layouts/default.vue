@@ -207,7 +207,7 @@ export default {
       this.$store.commit('user/setAccessToken', serverConnectionConfig.token)
       this.$store.commit('user/setServerConnectionConfig', serverConnectionConfig)
 
-      this.$socket.connect(serverConnectionConfig.address, serverConnectionConfig.token)
+      await this.$socket.connect(serverConnectionConfig.address, serverConnectionConfig.token)
 
       AbsLogger.info({ tag: 'default', message: `attemptConnection: Successful connection to last saved server config (${serverConnectionConfig.name})` })
       await this.initLibraries()
