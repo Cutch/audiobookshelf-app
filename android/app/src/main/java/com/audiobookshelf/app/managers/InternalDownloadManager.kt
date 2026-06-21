@@ -4,6 +4,8 @@ import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import android.webkit.CookieManager
+import com.audiobookshelf.app.device.DeviceManager
 import java.util.concurrent.TimeUnit
 import okhttp3.Call
 import okhttp3.Callback
@@ -20,7 +22,19 @@ class InternalDownloadManager(
 ) {
   private val tag = "InternalDownloadManager"
   /**
-   * Starts or resumes a download.
+   * Gets cookies for the given URL from the Android WebKit CookieManager.
+   * This ensures cookies set by the WebView (including Capacitor cookies) are included in native requests.
+   */
+  private fun getCookiesForUrl(url: String): String? {
+    return try {
+      CookieManager.getInstance().getCookie(url)
+    } catch (e: Exception) {
+      Log.e("DownloadItemPart", "Failed to get cookies for URL: $url", e)
+      null
+    }
+  }
+  /**
+   * Downloads a file from the given URL.
    *
    * @param url download URL
    * @param token access token sent in the Authorization header
@@ -35,8 +49,15 @@ class InternalDownloadManager(
                     .addHeader("Accept-Encoding", "identity")
                     .addHeader("Authorization", "Bearer $token")
                     .apply { if (existingBytes > 0L) header("Range", "bytes=$existingBytes-") }
-                    .build()
-    val call = client.newCall(request)
+                    
+    // Add cookies from WebKit CookieManager (includes Capacitor cookies)
+    val cookies = getCookiesForUrl(url)
+
+    if (!cookies.isNullOrEmpty()) {
+      request.addHeader("Cookie", cookies!!)
+      Log.d("getDownloadRequest", "getDownloadRequest: Adding cookies to request for ${url}")
+    }
+    val call = client.newCall(request.build())
     call.enqueue(
             object : Callback {
               override fun onFailure(call: Call, e: IOException) {

@@ -7,6 +7,7 @@ import com.audiobookshelf.app.data.EBookFile
 import com.audiobookshelf.app.data.LocalFolder
 import com.audiobookshelf.app.data.PodcastEpisode
 import com.audiobookshelf.app.device.DeviceManager
+import android.webkit.CookieManager
 import com.fasterxml.jackson.annotation.JsonIgnore
 import java.io.File
 
@@ -82,4 +83,36 @@ data class DownloadItemPart(
   @get:JsonIgnore
   val isInternalStorage get() = localFolderId.startsWith("internal-")
 
+  @get:JsonIgnore
+  val serverUrl get() = uri.toString()
+
+  /**
+   * Gets cookies for the given URL from the Android WebKit CookieManager.
+   * This ensures cookies set by the WebView (including Capacitor cookies) are included in native requests.
+   */
+  private fun getCookiesForUrl(url: String): String? {
+    return try {
+      CookieManager.getInstance().getCookie(url)
+    } catch (e: Exception) {
+      Log.e("DownloadItemPart", "Failed to get cookies for URL: $url", e)
+      null
+    }
+  }
+  @JsonIgnore
+  fun getDownloadRequest(): DownloadManager.Request {
+    val dlRequest = DownloadManager.Request(uri)
+    dlRequest.setTitle(filename)
+    dlRequest.setDescription("Downloading to $localFolderName with filename $filename")
+    dlRequest.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+    dlRequest.setDestinationUri(destinationUri)
+
+    // Add cookies from WebKit CookieManager (includes Capacitor cookies)
+    val cookies = getCookiesForUrl(DeviceManager.serverAddress)
+
+    if (!cookies.isNullOrEmpty()) {
+      dlRequest.addRequestHeader("Cookie", cookies!!)
+      Log.d("getDownloadRequest", "getDownloadRequest: Adding cookies to request for ${DeviceManager.serverAddress}")
+    }
+    return dlRequest
+  }
 }
