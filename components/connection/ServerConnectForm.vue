@@ -586,6 +586,7 @@ export default {
       const cookiesMap = await CapacitorCookies.getCookies({
         url: new URL(url).origin
       })
+
       const existingCookies = (headers?.Cookie ?? headers?.cookie ?? '').split(';')
       const cookieHeader = [...Object.entries(cookiesMap).map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`), ...existingCookies].join('; ')
       const options = {
@@ -978,7 +979,7 @@ export default {
       this.$store.commit('user/setAccessToken', serverConnectionConfig.token)
       this.$store.commit('user/setServerConnectionConfig', serverConnectionConfig)
 
-      this.$socket.connect(this.serverConfig.address, this.serverConfig.token)
+      await this.$socket.connect(this.serverConfig.address, this.serverConfig.token)
       this.$router.replace('/bookshelf')
     },
     async authenticateToken() {

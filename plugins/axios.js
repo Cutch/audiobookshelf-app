@@ -1,3 +1,5 @@
+import { CapacitorCookies } from '@capacitor/core'
+
 export default function ({ $axios, store, $db }) {
   // Track if we're currently refreshing to prevent multiple refresh attempts
   let isRefreshing = false
@@ -39,11 +41,19 @@ export default function ({ $axios, store, $db }) {
     }
   }
 
-  $axios.onRequest((config) => {
+  $axios.onRequest(async (config) => {
     console.log('[Axios] Making request to ' + config.url)
     if (config.url.startsWith('http:') || config.url.startsWith('https:') || config.url.startsWith('capacitor:')) {
       return
     }
+    const cookiesMap = await CapacitorCookies.getCookies({
+      url: new URL(config.url).origin
+    })
+    const cookieHeader = Object.entries(cookiesMap)
+      .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
+      .join('; ')
+
+    config.headers.common['Cookie'] = cookieHeader
 
     const bearerToken = store.getters['user/getToken']
     if (bearerToken) {
